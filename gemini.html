@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>AIGIS-DET V31 // NEURAL EVOLVE</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { margin: 0; background: #01080a; overflow: hidden; font-family: 'monospace'; }
+        .glass { background: rgba(0, 10, 15, 0.95); border-right: 1px solid #00f2ff44; backdrop-filter: blur(10px); }
+        .input-css { background: #001a1a; border: 1px solid #004444; color: #00f2ff; font-size: 11px; padding: 5px; width: 100%; outline: none; }
+        .btn-ui { border: 1px solid #00f2ff; color: #00f2ff; padding: 10px; cursor: pointer; transition: 0.2s; font-size: 11px; font-weight: bold; }
+        .btn-ui:hover { background: #00f2ff; color: #000; box-shadow: 0 0 20px #00f2ff; }
+        #outcome-popup { 
+            display: none; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            padding: 30px; border: 2px solid #00f2ff; background: rgba(0,0,0,0.95); z-index: 100;
+            text-align: center; min-width: 450px;
+        }
+        .stat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; text-align: left; font-size: 10px; }
+    </style>
+</head>
+<body>
+
+    <div id="sidebar" class="absolute left-0 top-0 h-full w-72 glass z-20 p-5 flex flex-col text-cyan-400 border-r border-cyan-900">
+        <div class="mb-6">
+            <h1 class="text-lg font-bold tracking-tighter text-white">V31_NEURAL_EVOLVE</h1>
+            <p class="text-[9px] opacity-60">ACTIVE REINFORCEMENT LEARNING</p>
+        </div>
+
+        <div class="space-y-4 flex-grow">
+            <section>
+                <label class="text-[9px] uppercase opacity-50">Target Profile</label>
+                <select id="mType" class="input-css mt-1">
+                    <option value="linear">Linear (High-Velocity)</option>
+                    <option value="sinusoidal">Sinusoidal (High-G Sine)</option>
+                    <option value="evasive">Evasive (Lateral Random)</option>
+                </select>
+            </section>
+
+            <section>
+                <label class="text-[9px] uppercase opacity-50">Mach Velocity</label>
+                <input type="range" id="mSpeed" min="10" max="30" value="18" class="w-full accent-cyan-500 mt-1" oninput="updateUI()">
+                <div class="flex justify-between text-[10px] mt-1"><span class="text-white" id="speedVal">18.0 Mach</span></div>
+            </section>
+
+            <div class="flex flex-col space-y-2 pt-2">
+                <button onclick="setSimulation()" class="btn-ui">INIT NEURAL MESH</button>
+                <button onclick="startSimulation()" class="btn-ui bg-cyan-900/20 text-white">ENGAGE WAVE</button>
+            </div>
+
+            <section class="mt-4 p-3 bg-cyan-950/20 border border-cyan-900 rounded">
+                <h2 class="text-[10px] font-bold border-b border-cyan-800 pb-1 mb-2">GENETIC WEIGHTS</h2>
+                <div id="live-weights" class="text-[9px] space-y-1 font-mono">
+                    </div>
+            </section>
+        </div>
+    </div>
+
+    <div id="outcome-popup">
+        <h2 id="popup-title" class="text-2xl font-black mb-2"></h2>
+        <p id="evolution-note" class="text-[10px] text-yellow-500 mb-4 uppercase tracking-widest italic"></p>
+        <div id="popup-body" class="stat-grid mb-6 text-cyan-200"></div>
+        <button onclick="closePopup()" class="btn-ui px-8">APPLY LEARNING & RE-ENGAGE</button>
+    </div>
+
+    <script>
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(45, window.innerWidth/window.innerHeight, 1, 15000);
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.body.appendChild(renderer.domElement);
+
+        camera.position.set(-1800, 1200, 2200);
+        camera.lookAt(0, 0, 0);
+        scene.add(new THREE.GridHelper(8000, 80, 0x003333, 0x001111));
+        
+        // --- THE EVOLVING BRAIN ---
+        let brain = {
+            generation: 1,
+            weights: {
+                linear: { n: 3.0, leadBias: 0.2 },
+                sinusoidal: { n: 4.0, leadBias: 0.5 },
+                evasive: { n: 4.5, leadBias: 0.7 }
+            },
+            history: [] 
+        };
+
+        let missiles = [], interceptors = [], simActive = false, clock = 0;
+        let lastLaunchTime = 0, destroyedCount = 0, leakedCount = 0, totalWaveSize = 0;
+
+        function updateUI() {
+            const mSpeed = parseFloat(document.getElementById('mSpeed').value);
+            document.getElementById('speedVal').innerText = mSpeed.toFixed(1) + " Mach";
+            
+            const type = document.getElementById('mType').value;
+            const w = brain.weights[type];
+            document.getElementById('live-weights').innerHTML = `
+                <div class="flex justify-between"><span>NAV_N:</span><span class="text-white">${w.n.toFixed(2)}</span></div>
+                <div class="flex justify-between"><span>LEAD_BIAS:</span><span class="text-white">${w.leadBias.toFixed(2)}</span></div>
+                <div class="flex justify-between"><span>GEN:</span><span class="text-yellow-500">${brain.generation}</span></div>
+            `;
+        }
+
+        window.closePopup = function() {
+            document.getElementById('outcome-popup').style.display = 'none';
+            setSimulation();
+        }
+
+        window.setSimulation = function() {
+            missiles.forEach(m => scene.remove(m.mesh));
+            interceptors.forEach(i => scene.remove(i.mesh));
+            missiles = []; interceptors = []; simActive = false; clock = 0;
+            destroyedCount = 0; leakedCount = 0;
+            totalWaveSize = parseInt(document.getElementById('mCount') ? 10 : 10); // Default 10
+
+            const mSpeed = parseFloat(document.getElementById('mSpeed').value);
+            const mType = document.getElementById('mType').value;
+
+            for(let i=0; i<totalWaveSize; i++) {
+                const mesh = new THREE.Mesh(new THREE.ConeGeometry(10, 30, 8), new THREE.MeshBasicMaterial({color: 0xff4444}));
+                mesh.position.set(4000 + (i*300), 200, (i - 5) * 150); 
+                mesh.rotation.z = Math.PI/2;
+                scene.add(mesh);
+                missiles.push({ mesh, active: true, targeted: false, speed: mSpeed, type: mType, startY: 200, startZ: mesh.position.z, outcome: null });
+            }
+            updateUI();
+        };
+
+        window.startSimulation = function() { if(missiles.length) simActive = true; };
+
+        function applyLearning() {
+            const type = document.getElementById('mType').value;
+            const currentWeights = brain.weights[type];
+            const sr = destroyedCount / totalWaveSize;
+
+            brain.generation++;
+
+            if (sr < 1.0) {
+                // FAILURE FEEDBACK: Adjust N based on miss patterns
+                // If many leaked, N was likely too low (not turning enough)
+                currentWeights.n += (1.0 - sr) * 0.8;
+                currentWeights.leadBias += 0.1;
+                document.getElementById('evolution-note').innerText = "Mutating Weights: Increasing Agression";
+            } else {
+                // SUCCESS FEEDBACK: Optimize for efficiency (reduce N slightly to avoid overshoot)
+                currentWeights.n -= 0.05; 
+                document.getElementById('evolution-note').innerText = "Weights Optimized: Efficiency Protocol";
+            }
+
+            // Clamp values to physical limits
+            currentWeights.n = Math.max(2.0, Math.min(8.0, currentWeights.n));
+            currentWeights.leadBias = Math.max(0.1, Math.min(1.5, currentWeights.leadBias));
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            if(simActive) {
+                clock += 0.016;
+                const mSpeed = parseFloat(document.getElementById('mSpeed').value);
+                const intSpeed = mSpeed * 2.2; 
+                const type = document.getElementById('mType').value;
+                const weights = brain.weights[type];
+
+                missiles.forEach(m => {
+                    if(!m.active) return;
+                    m.mesh.position.x -= m.speed;
+                    if(m.type === 'sinusoidal') m.mesh.position.y = m.startY + Math.sin(clock * 6) * 150;
+                    if(m.type === 'evasive') m.mesh.position.z = m.startZ + Math.cos(clock * 4) * 200;
+
+                    if(m.mesh.position.x < 0) {
+                        m.active = false; m.outcome = 'leak'; leakedCount++;
+                        scene.remove(m.mesh); 
+                        if(missiles.filter(x => x.outcome !== null).length === totalWaveSize) endSim();
+                    }
+
+                    if(!m.targeted && m.mesh.position.x > 400) {
+                        const iM = new THREE.Mesh(new THREE.CylinderGeometry(3, 3, 40), new THREE.MeshBasicMaterial({color: 0x00ffff}));
+                        iM.position.set(0, 0, 0); 
+                        scene.add(iM);
+                        interceptors.push({ mesh: iM, target: m, active: true, lastRelPos: null });
+                        m.targeted = true; 
+                    }
+                });
+
+                interceptors.forEach(i => {
+                    if(!i.active) return;
+                    const tPos = i.target.mesh.position;
+                    const iPos = i.mesh.position;
+                    
+                    const relPos = new THREE.Vector3().subVectors(tPos, iPos);
+                    if (!i.lastRelPos) i.lastRelPos = relPos.clone();
+
+                    // PN-GUIDANCE LOGIC
+                    const currentDir = relPos.clone().normalize();
+                    const lastDir = i.lastRelPos.clone().normalize();
+                    const losRate = new THREE.Vector3().subVectors(currentDir, lastDir);
+                    
+                    // The "Learning" Vector: Higher N = sharper correction
+                    const pursuitDir = currentDir.clone().add(losRate.multiplyScalar(weights.n)).normalize();
+
+                    i.mesh.position.add(pursuitDir.multiplyScalar(intSpeed));
+                    i.mesh.lookAt(tPos);
+
+                    const killRadius = 100 + (mSpeed * 2);
+                    if(i.mesh.position.distanceTo(tPos) < killRadius) {
+                        i.target.active = false; i.target.outcome = 'hit';
+                        destroyedCount++; scene.remove(i.target.mesh); scene.remove(i.mesh);
+                        i.active = false;
+                        if(missiles.filter(x => x.outcome !== null).length === totalWaveSize) endSim();
+                    }
+                    i.lastRelPos.copy(relPos);
+                });
+            }
+            renderer.render(scene, camera);
+        }
+
+        function endSim() {
+            simActive = false;
+            applyLearning();
+            const popup = document.getElementById('outcome-popup');
+            popup.style.display = 'block';
+            document.getElementById('popup-title').innerText = leakedCount === 0 ? "WAVE NEUTRALIZED" : "PERIMETER BREACH";
+            document.getElementById('popup-title').style.color = leakedCount === 0 ? "#00ffcc" : "#ff3333";
+            
+            const type = document.getElementById('mType').value;
+            const w = brain.weights[type];
+
+            document.getElementById('popup-body').innerHTML = `
+                <div>KILLS: <b>${destroyedCount}</b></div>
+                <div>LEAKS: <b>${leakedCount}</b></div>
+                <div>NEW NAV_N: <b class="text-yellow-400">${w.n.toFixed(2)}</b></div>
+                <div>GEN: <b class="text-yellow-400">${brain.generation}</b></div>
+            `;
+        }
+        setSimulation();
+        animate();
+    </script>
+</body>
+</html>

@@ -1,0 +1,347 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>AIGIS-DET V19 // PN-GUIDANCE</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { margin: 0; background: #01080a; overflow: hidden; font-family: 'monospace'; }
+        .glass { background: rgba(0, 10, 15, 0.95); border-right: 1px solid #00f2ff44; backdrop-filter: blur(10px); }
+        .input-css { background: #001a1a; border: 1px solid #004444; color: #00f2ff; font-size: 11px; padding: 5px; width: 100%; outline: none; }
+        .btn-ui { border: 1px solid #00f2ff; color: #00f2ff; padding: 10px; cursor: pointer; transition: 0.2s; font-size: 11px; font-weight: bold; }
+        .btn-ui:hover { background: #00f2ff; color: #000; box-shadow: 0 0 20px #00f2ff; }
+        #outcome-popup { 
+            display: none; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            padding: 30px; border: 2px solid #00f2ff; background: rgba(0,0,0,0.95); z-index: 100;
+            text-align: center; min-width: 400px;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="sidebar" class="absolute left-0 top-0 h-full w-72 glass z-20 p-5 flex flex-col text-cyan-400 border-r border-cyan-900">
+        <div class="mb-6">
+            <h1 class="text-lg font-bold tracking-tighter text-white">V19_PN_GUIDANCE</h1>
+            <p class="text-[9px] opacity-60">PROPORTIONAL NAV + RAPID HEURISTICS</p>
+        </div>
+
+        <div class="space-y-4 flex-grow">
+            <section>
+                <label class="text-[9px] uppercase opacity-50">Wave Density</label>
+                <div class="flex gap-2 mt-1">
+                    <input type="number" id="mCount" value="10" max="150" class="input-css w-1/3">
+                    <select id="mType" class="input-css w-2/3">
+                        <option value="linear">Linear</option>
+                        <option value="sinusoidal">Sinusoidal (High-G)</option>
+                        <option value="evasive">Evasive (Lateral)</option>
+                    </select>
+                </div>
+            </section>
+
+            <section>
+                <label class="text-[9px] uppercase opacity-50">Target Speed (Mach)</label>
+                <input type="range" id="mSpeed" min="5" max="25" value="15" class="w-full accent-cyan-500 mt-1" oninput="updateUI()">
+                <div class="flex justify-between text-[10px] mt-1"><span class="text-white" id="speedVal">15.0 Mach</span></div>
+            </section>
+
+            <div class="flex flex-col space-y-2 pt-2">
+                <button onclick="setSimulation()" class="btn-ui">CALIBRATE RADAR</button>
+                <button onclick="startSimulation()" class="btn-ui bg-cyan-900/20 text-white">ENGAGE</button>
+            </div>
+
+            <section class="mt-4 p-3 bg-cyan-950/20 border border-cyan-900 rounded">
+                <h2 class="text-[10px] font-bold border-b border-cyan-800 pb-1 mb-2">NEURAL ADAPTATION</h2>
+                <div class="text-[10px] space-y-2">
+                    <div class="flex justify-between"><span>NAV CONSTANT (N):</span><span id="ui-nav-n" class="text-yellow-400">3.0</span></div>
+                    <div class="flex justify-between"><span>SUCCESS RATE:</span><span id="ui-rate" class="text-green-400">0%</span></div>
+                </div>
+            </section>
+        </div>
+    </div>
+
+    <div id="outcome-popup">
+        <h2 id="popup-title" class="text-3xl font-black mb-4"></h2>
+        <div id="popup-body" class="text-sm font-mono mb-6 text-cyan-200"></div>
+        <button onclick="closePopup()" class="btn-ui px-8">FAST-TRACK EVOLUTION</button>
+    </div>
+
+    <script>
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(45, window.innerWidth/window.innerHeight, 1, 15000);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(window.innerWidth, window.innerHeight);
+document.body.appendChild(renderer.domElement);
+
+camera.position.set(-1600, 1000, 2000);
+camera.lookAt(0, 0, 0);
+
+scene.add(new THREE.GridHelper(6000, 60, 0x002222, 0x001111));
+
+/* 🔥 REAL LEARNING BRAIN */
+let brain = { 
+    navN: { linear: 3, sinusoidal: 3, evasive: 3 },
+    strategyScores: {
+        linear: { pn: 3, lead: 0.5, pursuit: 0.5 },
+        sinusoidal: { pn: 1, lead: 1, pursuit: 1 },
+        evasive: { pn: 1, lead: 1, pursuit: 1 }
+    },
+    exploration: 0.15,
+    interceptorCap: 3,
+
+    lastPerformance: {
+        successRate: 0,
+        leaks: Infinity
+    }
+};
+
+let missiles = [], interceptors = [], simActive = false, clock = 0;
+let lastLaunchTime = 0, destroyedCount = 0, leakedCount = 0, totalWaveSize = 0;
+
+function updateUI() {
+    const mSpeed = parseFloat(document.getElementById('mSpeed').value);
+    document.getElementById('speedVal').innerText = mSpeed.toFixed(1) + " Mach";
+
+    const avgN = (brain.navN.linear + brain.navN.sinusoidal + brain.navN.evasive)/3;
+    document.getElementById('ui-nav-n').innerText = avgN.toFixed(2);
+
+    const rate = totalWaveSize > 0 ? (destroyedCount / totalWaveSize * 100).toFixed(0) : 0;
+    document.getElementById('ui-rate').innerText = rate + "%";
+}
+
+window.closePopup = function() {
+    document.getElementById('outcome-popup').style.display = 'none';
+    setSimulation();
+};
+
+window.setSimulation = function() {
+    missiles.forEach(m => scene.remove(m.mesh));
+    interceptors.forEach(i => scene.remove(i.mesh));
+
+    missiles = []; interceptors = [];
+    simActive = false; clock = 0; lastLaunchTime = 0;
+    destroyedCount = 0; leakedCount = 0;
+
+    totalWaveSize = parseInt(document.getElementById('mCount').value);
+    const mSpeed = parseFloat(document.getElementById('mSpeed').value);
+    const mType = document.getElementById('mType').value;
+
+    for(let i=0; i<totalWaveSize; i++) {
+        const mesh = new THREE.Mesh(
+            new THREE.ConeGeometry(8, 25, 8),
+            new THREE.MeshBasicMaterial({color: 0xff3333})
+        );
+
+        mesh.position.set(2800 + (i*150), 150, (i - (totalWaveSize/2)) * 70);
+        mesh.rotation.z = Math.PI/2;
+        scene.add(mesh);
+
+        missiles.push({ 
+            mesh, active: true, targeted: false,
+            speed: mSpeed, type: mType,
+            startY: 150, startZ: mesh.position.z,
+            outcome: null,
+            strategyUsed: null
+        });
+    }
+    updateUI();
+};
+
+window.startSimulation = function() { if(missiles.length) simActive = true; };
+
+function selectStrategy(missile) {
+    if (missile.type === 'linear') return 'pn';
+
+    const s = brain.strategyScores[missile.type];
+
+    if (Math.random() < brain.exploration) {
+        return ['pn','lead','pursuit'][Math.floor(Math.random()*3)];
+    }
+
+    if (s.pn >= s.lead && s.pn >= s.pursuit) return 'pn';
+    if (s.lead >= s.pn && s.lead >= s.pursuit) return 'lead';
+    return 'pursuit';
+}
+
+function getPredictedPosition(missile, interceptorPos) {
+    const currentPos = missile.mesh.position.clone();
+    const distance = currentPos.distanceTo(interceptorPos);
+    const mSpeed = missile.speed;
+    const iSpeed = mSpeed * 1.8;
+
+    const t = Math.min(distance / iSpeed, 2.0);
+    let predicted = currentPos.clone();
+
+    if (missile.type === 'linear') predicted.x -= mSpeed * t;
+    else if (missile.type === 'sinusoidal') {
+        predicted.x -= mSpeed * t;
+        predicted.y = missile.startY + Math.sin((clock + t) * 6) * 100;
+    }
+    else if (missile.type === 'evasive') {
+        predicted.x -= mSpeed * t;
+        predicted.z = missile.startZ + Math.cos((clock + t) * 4) * 150;
+    }
+
+    return predicted;
+}
+
+/* 🚀 REAL LEARNING */
+function checkWaveEnd() {
+    const finished = missiles.filter(m => m.outcome !== null).length;
+
+    if (finished === totalWaveSize && totalWaveSize > 0) {
+        simActive = false;
+
+        const successRate = destroyedCount / totalWaveSize;
+
+        const prev = brain.lastPerformance;
+        const improvement = successRate - prev.successRate;
+        const leakImprovement = prev.leaks - leakedCount;
+
+        /* 🔥 LEARNING LOGIC */
+        if (improvement <= 0) {
+            // NOT IMPROVING → AGGRESSIVE FIX
+            brain.navN.linear += 0.4;
+            brain.navN.sinusoidal += 0.4;
+            brain.navN.evasive += 0.4;
+
+            brain.interceptorCap += 1; // 🔥 more missiles fired
+        } else {
+            // IMPROVING → STABILIZE
+            brain.navN.linear -= 0.1;
+            brain.navN.sinusoidal -= 0.1;
+            brain.navN.evasive -= 0.1;
+        }
+
+        // clamp
+        brain.navN.linear = Math.min(6, Math.max(2.5, brain.navN.linear));
+        brain.navN.sinusoidal = Math.min(6, Math.max(2.5, brain.navN.sinusoidal));
+        brain.navN.evasive = Math.min(6, Math.max(2.5, brain.navN.evasive));
+
+        brain.interceptorCap = Math.min(8, brain.interceptorCap);
+
+        brain.exploration *= 0.9;
+
+        // save performance
+        brain.lastPerformance.successRate = successRate;
+        brain.lastPerformance.leaks = leakedCount;
+
+        /* ✅ POPUP WITH IMPROVEMENT */
+        document.getElementById('popup-title').innerText =
+            leakedCount === 0 ? "WAVE CLEARED" : "SYSTEM BREACH";
+
+        document.getElementById('popup-body').innerText =
+`Kills: ${destroyedCount} | Leaks: ${leakedCount}
+
+Success Rate: ${(successRate*100).toFixed(1)}%
+
+Improvement: ${(improvement*100).toFixed(1)}%
+Leak Reduction: ${leakImprovement}
+
+Interceptor Cap: ${brain.interceptorCap}
+
+NAV N:
+L:${brain.navN.linear.toFixed(2)}
+S:${brain.navN.sinusoidal.toFixed(2)}
+E:${brain.navN.evasive.toFixed(2)}
+`;
+
+        document.getElementById('outcome-popup').style.display = 'block';
+        updateUI();
+    }
+}
+
+/* MAIN LOOP */
+function animate() {
+    requestAnimationFrame(animate);
+
+    if(simActive) {
+        clock += 0.016;
+        const mSpeed = parseFloat(document.getElementById('mSpeed').value);
+        const intSpeed = mSpeed * 1.8;
+
+        missiles.forEach(m => {
+            if(!m.active) return;
+
+            m.mesh.position.x -= m.speed;
+
+            if(m.type === 'sinusoidal')
+                m.mesh.position.y = m.startY + Math.sin(clock * 6) * 100;
+
+            if(m.type === 'evasive')
+                m.mesh.position.z = m.startZ + Math.cos(clock * 4) * 150;
+
+            if(m.mesh.position.x < -400) {
+                m.active = false;
+                m.outcome = 'leak';
+                leakedCount++;
+                scene.remove(m.mesh);
+                checkWaveEnd();
+                updateUI();
+            }
+
+            const activeInts = interceptors.filter(i => i.active).length;
+
+            if(activeInts < brain.interceptorCap && (clock - lastLaunchTime > 0.2)) {
+
+                const target = missiles.find(x => x.active && !x.targeted);
+                if(!target) return;
+
+                const iM = new THREE.Mesh(
+                    new THREE.CylinderGeometry(2, 2, 30),
+                    new THREE.MeshBasicMaterial({color: 0x00f2ff})
+                );
+
+                iM.position.set(0,0,0);
+                scene.add(iM);
+
+                const strategy = selectStrategy(target);
+
+                interceptors.push({
+                    mesh: iM,
+                    target: target,
+                    active: true
+                });
+
+                target.targeted = true;
+                lastLaunchTime = clock;
+            }
+        });
+
+        interceptors.forEach(i => {
+            if(!i.active) return;
+
+            let tPos = getPredictedPosition(i.target, i.mesh.position);
+
+            const dir = new THREE.Vector3()
+                .subVectors(tPos, i.mesh.position)
+                .normalize();
+
+            i.mesh.position.add(dir.multiplyScalar(intSpeed));
+
+            const d = i.mesh.position.distanceTo(tPos);
+
+            if(d < 40) {
+                i.active = false;
+                i.target.active = false;
+                i.target.outcome = 'hit';
+
+                destroyedCount++;
+                scene.remove(i.target.mesh);
+                scene.remove(i.mesh);
+
+                checkWaveEnd();
+                updateUI();
+            }
+        });
+    }
+
+    renderer.render(scene, camera);
+}
+
+updateUI();
+animate();
+setSimulation();
+</script>
+</body>
+</html>
