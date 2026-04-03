@@ -1,0 +1,440 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Brahmos Defense 2.0</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body { margin: 0; background: #01080a; overflow: hidden; font-family: 'monospace'; color: #00f2ff; }
+        .glass { background: rgba(0, 15, 20, 0.98); border-right: 1px solid #00f2ff44; backdrop-filter: blur(15px); }
+        .input-css { background: #001a1a; border: 1px solid #004444; color: #00f2ff; font-size: 11px; padding: 6px; width: 100%; outline: none; margin-bottom: 8px; }
+        .btn-ui { border: 1px solid #00f2ff; color: #00f2ff; padding: 10px; cursor: pointer; transition: 0.2s; font-size: 11px; font-weight: bold; width: 100%; margin-top: 5px; text-transform: uppercase; text-align: center; background: rgba(0,0,0,0.3); }
+        .btn-ui:hover { background: #00f2ff; color: #000; box-shadow: 0 0 20px #00f2ff; }
+        #chart-container { position: absolute; bottom: 20px; right: 20px; width: 400px; height: 220px; background: rgba(0,0,0,0.95); border: 1px solid #00f2ff; padding: 10px; z-index: 50; }
+        #outcome-popup { display: none; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); padding: 30px; border: 2px solid #00f2ff; background: #000; z-index: 100; width: 500px; box-shadow: 0 0 80px rgba(0,242,255,0.6); }
+        #audit-trail { font-size: 9px; color: #00ccff; height: 180px; overflow-y: auto; border: 1px solid #004444; padding: 5px; background: #000808; }
+        .audit-entry { border-bottom: 1px solid #002222; padding: 4px 0; }
+        .highlight-red { color: #ff4444; font-weight: bold; }
+        .highlight-green { color: #00ff88; font-weight: bold; }
+        label { font-size: 9px; text-transform: uppercase; opacity: 0.7; color: #00f2ff; }
+    </style>
+</head>
+<body>
+
+    <div id="sidebar" class="absolute left-0 top-0 h-full w-80 glass z-20 p-6 flex flex-col border-r border-cyan-800">
+        <div class="mb-4">
+            <h1 class="text-xl font-black text-white italic tracking-tighter">Brahmos Defense 2.0</h1>
+            <p class="text-[9px] text-cyan-400">DETERMINISTIC EVOLUTION ENGINE</p>
+        </div>
+
+        <section class="mb-4">
+            <label>Wave Density</label>
+            <input type="number" id="mCount" value="80" class="input-css">
+            
+            <label>Battery Stations (at 0,0,0)</label>
+            <input type="number" id="bCount" value="1" class="input-css">
+
+            <label>Threat Profile</label>
+            <select id="mType" class="input-css">
+                <option value="linear">Linear</option>
+                <option value="sinusoidal">Sinusoidal</option>
+                <option value="evasive" selected>Evasive</option>
+            </select>
+            
+            <button onclick="manualInitialize()" class="btn-ui mb-2 border-white text-white">Reset & Re-Center</button>
+            <div class="flex gap-2">
+                <button onclick="runBatchTraining()" id="train-btn" class="btn-ui border-yellow-500 text-yellow-500 flex-1">Start Training</button>
+                <button onclick="forceStop()" id="stop-btn" class="btn-ui border-red-500 text-red-500 flex-1 hidden">STOP</button>
+            </div>
+        </section>
+
+        <label>Neural Logic Ledger</label>
+        <div id="audit-trail" class="mb-4"></div>
+
+        <div id="analytics" class="text-[10px] font-mono mt-auto space-y-2">
+            <div class="border border-cyan-900 p-2 bg-black/40">
+                <p class="opacity-50">SUCCESSIVE 100%</p>
+                <p id="streak-val" class="text-white text-xs font-bold">0 / 3</p>
+            </div>
+            <div class="border border-cyan-900 p-2 bg-black/40 flex justify-between">
+                <div>
+                    <p class="opacity-50">SOFTWARE (N) MAX: 4.2</p>
+                    <p id="nav-val" class="text-white text-xs font-bold">1.50</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div id="outcome-popup">
+        <h2 id="popup-title" class="text-2xl font-black mb-2 italic border-b border-cyan-800 pb-2"></h2>
+        <div id="popup-body" class="text-[12px] leading-relaxed mb-4 text-cyan-100 font-mono py-2"></div>
+        <button onclick="closePopup()" class="btn-ui">Next Wave</button>
+    </div>
+
+    <div id="chart-container"><canvas id="learningChart"></canvas></div>
+
+    <script>
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x01080a);
+        scene.fog = new THREE.FogExp2(0x01080a, 0.00018); 
+
+        const camera = new THREE.PerspectiveCamera(45, window.innerWidth/window.innerHeight, 1, 20000);
+        const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.body.appendChild(renderer.domElement);
+
+        camera.position.set(-2500, 1500, 2500);
+        camera.lookAt(0, 0, 0);
+
+        const ambientLight = new THREE.AmbientLight(0x334455, 1.2);
+        scene.add(ambientLight);
+        const directionalLight = new THREE.DirectionalLight(0xffffff, 1.5);
+        directionalLight.position.set(2000, 3000, 1000);
+        scene.add(directionalLight);
+        const originLight = new THREE.PointLight(0x00f2ff, 2, 2000);
+        originLight.position.set(0, 100, 0);
+        scene.add(originLight);
+
+        const grid = new THREE.GridHelper(10000, 50, 0x00f2ff, 0x001122);
+        grid.material.transparent = true;
+        grid.material.opacity = 0.5;
+        scene.add(grid);
+
+        const batteryMat = new THREE.MeshStandardMaterial({ color: 0x00ffff, metalness: 0.8, roughness: 0.2, emissive: 0x004444 });
+        const missileMat = new THREE.MeshStandardMaterial({ color: 0xff2222, metalness: 0.7, roughness: 0.3, emissive: 0x550000 });
+        const interceptorMat = new THREE.MeshStandardMaterial({ color: 0xffffff, metalness: 0.9, roughness: 0.1, emissive: 0x333333 });
+
+        const missileGeo = new THREE.ConeGeometry(10, 40, 16);
+        missileGeo.rotateX(Math.PI / 2);
+        const interceptorGeo = new THREE.CylinderGeometry(3, 3, 45, 16);
+        interceptorGeo.rotateX(Math.PI / 2);
+
+        let brain = {}; 
+        let missiles = [], interceptors = [], batteries = [], explosions = [], simActive = false, clock = 0;
+        let destroyedCount = 0, leakedCount = 0, totalWaveSize = 0;
+        let chartInstance = null, isBatchRunning = false;
+
+        function logAudit(msg) {
+            const audit = document.getElementById('audit-trail');
+            const entry = document.createElement('div');
+            entry.className = 'audit-entry';
+            entry.innerHTML = `> ${msg}`;
+            audit.prepend(entry);
+        }
+
+        function createExplosion(pos) {
+            const expGeo = new THREE.SphereGeometry(30, 16, 16);
+            const expMat = new THREE.MeshBasicMaterial({ color: 0xffaa00, transparent: true, opacity: 1 });
+            const expMesh = new THREE.Mesh(expGeo, expMat);
+            expMesh.position.copy(pos);
+            scene.add(expMesh);
+            
+            const expLight = new THREE.PointLight(0xff5500, 3, 600);
+            expLight.position.copy(pos);
+            scene.add(expLight);
+
+            explosions.push({ mesh: expMesh, mat: expMat, light: expLight, life: 1.0 });
+        }
+
+        function manualInitialize() {
+            brain = { 
+                navN: { linear: 1.5, sinusoidal: 1.5, evasive: 1.5 }, 
+                maxNavN: 4.2,         
+                interceptorCap: 20,   
+                aggression: 0.4,
+                history: [],
+                stopSignal: false,
+                stagnationCounter: 0,
+                bestSR: 0,
+                streak: 0
+            };
+            document.getElementById('nav-val').innerText = "1.50";
+            document.getElementById('streak-val').innerText = "0 / 3";
+            document.getElementById('audit-trail').innerHTML = "";
+            logAudit("System Reset: Commencing Micro-Step Evolution.");
+            if (chartInstance) { chartInstance.destroy(); chartInstance = null; }
+            updateChart();
+            setSimulation();
+        }
+
+        function setSimulation() {
+            missiles.forEach(m => scene.remove(m.mesh));
+            interceptors.forEach(i => scene.remove(i.mesh));
+            batteries.forEach(b => scene.remove(b.mesh));
+            explosions.forEach(e => { scene.remove(e.mesh); scene.remove(e.light); });
+            missiles = []; interceptors = []; batteries = []; explosions = [];
+            clock = 0; destroyedCount = 0; leakedCount = 0; 
+            const bCount = parseInt(document.getElementById('bCount').value);
+            const mCount = parseInt(document.getElementById('mCount').value);
+            const mType = document.getElementById('mType').value;
+
+            for(let i=0; i<bCount; i++) {
+                const bMesh = new THREE.Mesh(new THREE.BoxGeometry(80, 30, 80), batteryMat);
+                bMesh.position.set(0, 15, (i - (bCount-1)/2) * 100);
+                scene.add(bMesh);
+                batteries.push({ mesh: bMesh, lastLaunchTime: 0 });
+            }
+
+            const cols = Math.ceil(Math.sqrt(mCount));
+            for(let i=0; i<mCount; i++) {
+                const mesh = new THREE.Mesh(missileGeo, missileMat);
+                const r = Math.floor(i / cols), c = i % cols;
+                const startZ = (c - cols/2) * 220;
+                mesh.position.set(4500 + r * 220, 200, startZ);
+                mesh.lookAt(mesh.position.x - 1, mesh.position.y, mesh.position.z);
+                scene.add(mesh);
+                missiles.push({ mesh, active: true, targeted: false, speed: 34, type: mType, startY: 200, startZ, outcome: null });
+            }
+            totalWaveSize = mCount;
+        }
+
+        async function runBatchTraining() {
+            isBatchRunning = true; brain.stopSignal = false; 
+            document.getElementById('stop-btn').classList.remove('hidden');
+            document.getElementById('train-btn').classList.add('hidden');
+
+            for(let i=0; i<60; i++) { 
+                if(brain.stopSignal) break;
+                setSimulation(); 
+                simActive = true;
+                while(simActive) { await new Promise(r => setTimeout(r, 100)); }
+                if(brain.stopSignal) break;
+                
+                const currentSR = (destroyedCount / totalWaveSize) * 100;
+                
+                if (currentSR >= 100) {
+                    brain.streak++;
+                    logAudit(`<span class="highlight-green">STREAK: ${brain.streak}/3 reached.</span>`);
+                } else {
+                    brain.streak = 0;
+                    
+                    if (currentSR > brain.bestSR + 0.6) { 
+                        brain.bestSR = currentSR;
+                        brain.stagnationCounter = 0;
+                        logAudit(`IMPROVEMENT: Efficiency climbed to ${currentSR.toFixed(1)}%.`);
+                    } else {
+                        brain.stagnationCounter++;
+                        if(brain.navN[document.getElementById('mType').value] >= brain.maxNavN) {
+                            logAudit(`<span class="highlight-red">[HARDWARE LIMIT] Wave ${i+1} saturated physical tubes (${brain.stagnationCounter}/7).</span>`);
+                        } else {
+                            logAudit(`STAGNATION: Diminishing returns detected (${brain.stagnationCounter}/7).`);
+                        }
+                    }
+                }
+
+                document.getElementById('streak-val').innerText = `${brain.streak} / 3`;
+                learn(); 
+
+                if (brain.streak >= 3) {
+                    showFinalOutcome("SUCCESS: SOFTWARE OPTIMIZED", `The AI has learned the perfect intercept trajectory and reached 100% efficiency.\n\nFinal Nav Gain (N): ${brain.navN[document.getElementById('mType').value].toFixed(2)}`);
+                    break;
+                }
+
+                if (brain.stagnationCounter >= 7) { 
+                    const bCount = parseInt(document.getElementById('bCount').value);
+                    const suggest = bCount + Math.ceil((totalWaveSize - destroyedCount) / 20);
+                    showFinalOutcome("HARDWARE BOTTLENECK CONFIRMED", `Stagnation strictly detected at ${currentSR.toFixed(1)}%.\n\n[SOFTWARE]: Optimized (N reached 4.2 ceiling).\n[HARDWARE]: Saturated (Station out of tubes).\n\nThe mathematical model has successfully learned the flight paths, but the physical station cannot reload fast enough to clear the wave.\n\nRECOMMENDATION: Increase base Origin Stations to ${suggest}.`);
+                    break;
+                }
+                await new Promise(r => setTimeout(r, 400)); 
+            }
+            isBatchRunning = false;
+            document.getElementById('stop-btn').classList.add('hidden');
+            document.getElementById('train-btn').classList.remove('hidden');
+        }
+
+        function learn() {
+            const type = document.getElementById('mType').value;
+            const sr = (destroyedCount / totalWaveSize) * 100;
+            brain.history.push(sr);
+            const error = (100 - sr) / 100;
+            
+            if (sr < 100) {
+                const oldN = brain.navN[type];
+
+                if (brain.navN[type] < brain.maxNavN) {
+                    const increment = 0.06 * error; 
+                    brain.navN[type] = Math.min(brain.maxNavN, brain.navN[type] + increment);
+                    
+                    if (brain.navN[type] === brain.maxNavN) {
+                        logAudit(`<span class="highlight-green">[SOFTWARE MAXED] Mathematical perfection reached (N=4.2).</span>`);
+                    } else {
+                        logAudit(`[LEARNING] N math adjusted: ${oldN.toFixed(2)} -> ${brain.navN[type].toFixed(2)}.`);
+                    }
+                }
+                
+                brain.aggression = Math.min(brain.aggression + 0.02 * error, 1.8);
+            }
+            
+            document.getElementById('nav-val').innerText = brain.navN[type].toFixed(2);
+            updateChart();
+        }
+
+        function showFinalOutcome(title, body) {
+            document.getElementById('popup-title').innerText = title;
+            document.getElementById('popup-title').style.color = title.includes("SUCCESS") ? "#00ff88" : "#ff4444";
+            document.getElementById('popup-body').innerText = body;
+            document.getElementById('outcome-popup').style.display = 'block';
+            forceStop();
+        }
+
+        function forceStop() { brain.stopSignal = true; simActive = false; }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            if(simActive) {
+                clock += 0.016;
+                const iSpeed = 30 * 2.5 * brain.aggression;
+
+                for(let j = explosions.length - 1; j >= 0; j--) {
+                    let e = explosions[j];
+                    e.life -= 0.05;
+                    e.mesh.scale.addScalar(0.15);
+                    e.mat.opacity = e.life;
+                    e.light.intensity = e.life * 3;
+                    if(e.life <= 0) {
+                        scene.remove(e.mesh);
+                        scene.remove(e.light);
+                        explosions.splice(j, 1);
+                    }
+                }
+
+                missiles.forEach(m => {
+                    if(!m.active) return;
+                    m.mesh.position.x -= m.speed;
+                    
+                    if(m.type === 'sinusoidal') m.mesh.position.y = m.startY + Math.sin(clock * 5) * 150;
+                    if(m.type === 'evasive') m.mesh.position.z = m.startZ + Math.cos(clock * 5) * 250;
+
+                    const nextPos = m.mesh.position.clone();
+                    nextPos.x -= m.speed;
+                    if(m.type === 'sinusoidal') nextPos.y = m.startY + Math.sin((clock + 0.016) * 5) * 150;
+                    if(m.type === 'evasive') nextPos.z = m.startZ + Math.cos((clock + 0.016) * 5) * 250;
+                    m.mesh.lookAt(nextPos);
+
+                    if(m.mesh.position.x < 0) { 
+                        m.active = false; m.outcome = 'leak'; leakedCount++;
+                        scene.remove(m.mesh); checkEnd();
+                    }
+
+                    if(!m.targeted) {
+                        let bestBat = null;
+                        let minDist = Infinity;
+                        batteries.forEach(bat => {
+                            const d = bat.mesh.position.distanceTo(m.mesh.position);
+                            if(d < minDist) { minDist = d; bestBat = bat; }
+                        });
+                        
+                        const bCount = parseInt(document.getElementById('bCount').value);
+                        const totalAllowed = brain.interceptorCap * bCount;
+                        const activeInts = interceptors.filter(i => i.active).length;
+                        const delay = 0.04; 
+
+                        if(bestBat && activeInts < totalAllowed && (clock - bestBat.lastLaunchTime) > delay) {
+                            const iM = new THREE.Mesh(interceptorGeo, interceptorMat);
+                            iM.position.copy(bestBat.mesh.position);
+                            scene.add(iM);
+                            interceptors.push({ mesh: iM, target: m, active: true, velocity: null, lastLOS: null });
+                            m.targeted = true;
+                            bestBat.lastLaunchTime = clock;
+                        }
+                    }
+                });
+
+                interceptors.forEach(i => {
+                    if(!i.active) return;
+
+                    if(i.target.outcome === 'leak' || !i.target.active) {
+                        i.active = false;
+                        scene.remove(i.mesh);
+                        return;
+                    }
+
+                    const tPos = i.target.mesh.position.clone();
+                    
+                    // --- THE FIX: PURE PROPORTIONAL NAVIGATION ---
+                    // 1. Calculate genuine Line of Sight (LOS)
+                    const losVec = new THREE.Vector3().subVectors(tPos, i.mesh.position);
+                    const currentLOS = losVec.clone().normalize();
+
+                    // 2. Initialize velocity straight at the target on launch (prevents backward firing)
+                    if (!i.velocity) i.velocity = currentLOS.clone().multiplyScalar(iSpeed);
+                    if (!i.lastLOS) i.lastLOS = currentLOS.clone();
+
+                    // 3. Calculate LOS Rate (how fast the target is drifting across the interceptor's vision)
+                    const losRate = new THREE.Vector3().subVectors(currentLOS, i.lastLOS);
+
+                    // 4. Apply Navigation Gain (N) to turn the interceptor into the target's path
+                    const n = brain.navN[i.target.type];
+                    i.velocity.add(losRate.multiplyScalar(n * iSpeed)); 
+                    i.velocity.normalize().multiplyScalar(iSpeed);
+
+                    // 5. Move and rotate the interceptor to face its actual travel path
+                    i.mesh.position.add(i.velocity);
+                    i.mesh.lookAt(i.mesh.position.clone().add(i.velocity));
+
+                    // 6. Impact Detection
+                    if(i.mesh.position.distanceTo(tPos) < 40) {
+                        createExplosion(tPos);
+                        i.active = false; i.target.active = false; i.target.outcome = 'hit';
+                        destroyedCount++; scene.remove(i.target.mesh); scene.remove(i.mesh);
+                        checkEnd();
+                    }
+                    i.lastLOS.copy(currentLOS);
+                });
+            }
+            renderer.render(scene, camera);
+        }
+
+        function checkEnd() {
+            const finished = missiles.filter(m => m.outcome !== null).length;
+            if (finished === totalWaveSize && totalWaveSize > 0) {
+                simActive = false;
+                if(!isBatchRunning) {
+                    const sr = (destroyedCount/totalWaveSize)*100;
+                    document.getElementById('popup-title').innerText = sr === 100 ? "SUCCESS" : "FAILURE";
+                    document.getElementById('popup-body').innerText = `Wave Efficiency: ${sr.toFixed(1)}%\nLogic Constant: ${brain.navN[document.getElementById('mType').value].toFixed(2)}`;
+                    document.getElementById('outcome-popup').style.display = 'block';
+                }
+            }
+        }
+
+        function updateChart() {
+            const ctx = document.getElementById('learningChart').getContext('2d');
+            if (chartInstance) chartInstance.destroy();
+            chartInstance = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: brain.history ? brain.history.map((_, i) => i + 1) : [],
+                    datasets: [{
+                        label: 'Accuracy', data: brain.history || [],
+                        borderColor: '#00f2ff', fill: true, backgroundColor: 'rgba(0, 242, 255, 0.05)', tension: 0.3
+                    }]
+                },
+                options: {
+                    responsive: true, maintainAspectRatio: false,
+                    scales: {
+                        y: { min: 0, max: 100, ticks: { color: '#00f2ff', font: { size: 9 } } },
+                        x: { ticks: { color: '#00f2ff', font: { size: 9 } } }
+                    },
+                    plugins: { legend: { display: false } }
+                }
+            });
+        }
+
+        function closePopup() { document.getElementById('outcome-popup').style.display = 'none'; if(isBatchRunning) setSimulation(); }
+        
+        window.addEventListener('resize', onWindowResize, false);
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        manualInitialize();
+        animate();
+    </script>
+</body>
+</html>

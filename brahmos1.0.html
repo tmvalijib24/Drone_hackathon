@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Brahmos Defense</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body { margin: 0; background: #01080a; overflow: hidden; font-family: 'monospace'; color: #00f2ff; }
+        .glass { background: rgba(0, 15, 20, 0.98); border-right: 1px solid #00f2ff44; backdrop-filter: blur(15px); }
+        .input-css { background: #001a1a; border: 1px solid #004444; color: #00f2ff; font-size: 11px; padding: 6px; width: 100%; outline: none; margin-bottom: 8px; }
+        .btn-ui { border: 1px solid #00f2ff; color: #00f2ff; padding: 10px; cursor: pointer; transition: 0.2s; font-size: 11px; font-weight: bold; width: 100%; margin-top: 5px; text-transform: uppercase; text-align: center; }
+        .btn-ui:hover { background: #00f2ff; color: #000; box-shadow: 0 0 20px #00f2ff; }
+        #chart-container { position: absolute; bottom: 20px; right: 20px; width: 420px; height: 260px; background: rgba(0,0,0,0.95); border: 1px solid #00f2ff; padding: 15px; z-index: 50; }
+        #outcome-popup { 
+            display: none; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            padding: 25px; border: 2px solid #00f2ff; background: #000; z-index: 100;
+            width: 480px; box-shadow: 0 0 60px rgba(0,242,255,0.5);
+        }
+        label { font-size: 9px; text-transform: uppercase; opacity: 0.7; margin-bottom: 2px; display: block; color: #00f2ff; }
+    </style>
+</head>
+<body>
+
+    <div id="sidebar" class="absolute left-0 top-0 h-full w-72 glass z-20 p-6 flex flex-col border-r border-cyan-800">
+        <div class="mb-4">
+            <h1 class="text-xl font-black text-white italic">Brahmos Defense</h1>
+            <p class="text-[9px] text-cyan-400">DETERMINISTIC EVOLUTION ENGINE</p>
+        </div>
+
+        <section class="mb-4">
+            <label>Missile Wave Size</label>
+            <input type="number" id="mCount" value="60" class="input-css">
+            
+            <label>Battery Stations</label>
+            <div class="flex gap-1 mb-2">
+                <input type="number" id="bCount" value="1" min="1" max="15" class="input-css !mb-0 flex-1">
+                <button onclick="addBattery()" class="bg-cyan-900 border border-cyan-400 px-3 text-xs text-cyan-200 hover:bg-cyan-400 hover:text-black font-bold">+</button>
+            </div>
+
+            <label>Threat Profile</label>
+            <select id="mType" class="input-css">
+                <option value="linear">Linear</option>
+                <option value="sinusoidal">Sinusoidal</option>
+                <option value="evasive" selected>Evasive</option>
+            </select>
+            
+            <button onclick="manualInitialize()" class="btn-ui mb-2">Initialize (Reset Brain)</button>
+            <div class="flex gap-2">
+                <button onclick="runBatchTest()" id="train-btn" class="btn-ui border-yellow-500 text-yellow-500 flex-1">Start Training</button>
+                <button onclick="forceStop()" id="stop-btn" class="btn-ui border-red-500 text-red-500 flex-1 hidden">STOP</button>
+            </div>
+
+            <div id="recom-alert" class="hidden mt-4 p-3 border-2 border-red-500 text-red-400 text-[10px] bg-red-950/40 animate-pulse">
+                <strong class="block mb-1">STAGNATION DETECTED:</strong> 
+                The model has hit a physical fire-rate limit. <span id="recom-text"></span>
+            </div>
+        </section>
+
+        <hr class="my-4 border-cyan-900">
+        <div id="analytics" class="text-[10px] text-cyan-200 font-mono space-y-2">
+            <p>CONVERGENCE: <span id="conv-status" class="text-white">IDLE</span></p>
+            <p>BEST RESULT: <span id="best-val" class="text-white">0%</span></p>
+            <p id="summary-text" class="text-gray-400 italic">Initialize clears neural bias.</p>
+        </div>
+    </div>
+
+    <div id="outcome-popup">
+        <h2 id="popup-title" class="text-2xl font-black mb-2 tracking-tighter"></h2>
+        <div id="popup-body" class="text-[12px] leading-relaxed mb-4 text-cyan-100 whitespace-pre-line font-mono"></div>
+        <button onclick="closePopup()" class="btn-ui">Next Wave</button>
+    </div>
+
+    <div id="chart-container"><canvas id="learningChart"></canvas></div>
+
+    <script>
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(45, window.innerWidth/window.innerHeight, 1, 15000);
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.body.appendChild(renderer.domElement);
+
+        camera.position.set(-2500, 1800, 3000);
+        camera.lookAt(0, 0, 0);
+        scene.add(new THREE.GridHelper(12000, 100, 0x003333, 0x001111));
+
+        let brain = {}; // Initialized via manualInitialize()
+        let missiles = [], interceptors = [], batteries = [], simActive = false, clock = 0;
+        let lastLaunchTime = 0, destroyedCount = 0, leakedCount = 0, totalWaveSize = 0;
+        let chartInstance = null, isBatchRunning = false;
+
+        function addBattery() {
+            const input = document.getElementById('bCount');
+            input.value = parseInt(input.value) + 1;
+            setSimulation(); // Update field visually but keep learning
+        }
+
+        function manualInitialize() {
+            // FIX: Explicitly resetting brain state to prevent the "76% Trap" (Local Minima)
+            brain = { 
+                navN: { linear: 3.0, sinusoidal: 3.5, evasive: 4.0 },
+                interceptorCap: 12,
+                aggression: 1.0,
+                history: [],
+                stopSignal: false,
+                convPoint: null,
+                stagnationCounter: 0,
+                bestSR: 0
+            };
+            
+            document.getElementById('conv-status').innerText = "IDLE";
+            document.getElementById('best-val').innerText = "0%";
+            document.getElementById('recom-alert').classList.add('hidden');
+            
+            updateChart(); // Wipes visual chart data
+            setSimulation();
+        }
+
+        function setSimulation() {
+            missiles.forEach(m => scene.remove(m.mesh));
+            interceptors.forEach(i => scene.remove(i.mesh));
+            batteries.forEach(b => scene.remove(b.mesh));
+            missiles = []; interceptors = []; batteries = []; 
+            clock = 0; destroyedCount = 0; leakedCount = 0; 
+            simActive = false; lastLaunchTime = 0;
+
+            const mCount = parseInt(document.getElementById('mCount').value);
+            const bCount = parseInt(document.getElementById('bCount').value);
+            const mType = document.getElementById('mType').value;
+            const fieldWidth = 4000;
+
+            for(let i=0; i<bCount; i++) {
+                const bMesh = new THREE.Mesh(new THREE.BoxGeometry(80, 20, 80), new THREE.MeshBasicMaterial({color: 0x005555}));
+                const offset = (i - (bCount-1)/2) * (fieldWidth / bCount);
+                bMesh.position.set(0, 10, offset);
+                scene.add(bMesh);
+                batteries.push({ mesh: bMesh, sectorMin: offset - (fieldWidth / (bCount * 2)), sectorMax: offset + (fieldWidth / (bCount * 2)) });
+            }
+
+            const cols = Math.ceil(Math.sqrt(mCount));
+            for(let i=0; i<mCount; i++) {
+                const mesh = new THREE.Mesh(new THREE.ConeGeometry(8, 28, 8), new THREE.MeshBasicMaterial({color: 0xff3333}));
+                const r = Math.floor(i / cols), c = i % cols;
+                const startZ = (c - cols/2) * 200;
+                mesh.position.set(4800 + r * 200, 200, startZ);
+                mesh.rotation.z = Math.PI/2;
+                scene.add(mesh);
+                missiles.push({ mesh, active: true, targeted: false, speed: 30, type: mType, startY: 200, startZ, outcome: null });
+            }
+            totalWaveSize = mCount;
+            simActive = true; 
+        }
+
+        async function runBatchTest() {
+            isBatchRunning = true; brain.stopSignal = false; 
+            document.getElementById('stop-btn').classList.remove('hidden');
+            document.getElementById('train-btn').classList.add('hidden');
+
+            for(let i=0; i<50; i++) {
+                if(brain.stopSignal) break;
+                setSimulation(); 
+                while(simActive) { await new Promise(r => setTimeout(r, 100)); }
+                if(brain.stopSignal) break;
+                
+                const currentSR = (destroyedCount / totalWaveSize) * 100;
+                
+                // Track Best Performance vs Stagnation
+                if (currentSR > brain.bestSR) {
+                    brain.bestSR = currentSR;
+                    brain.stagnationCounter = 0;
+                } else {
+                    brain.stagnationCounter++;
+                }
+
+                learn(); 
+
+                // TRIGGER: 7 Iteration Stagnation Halt
+                if (brain.stagnationCounter >= 7 && currentSR < 100) {
+                    forceStop();
+                    const suggest = Math.ceil(totalWaveSize / 15);
+                    document.getElementById('recom-alert').classList.remove('hidden');
+                    document.getElementById('recom-text').innerText = `Increase to ${suggest} stations. The current battery count cannot process this density.`;
+                    break;
+                }
+
+                await new Promise(r => setTimeout(r, 400)); 
+            }
+            
+            isBatchRunning = false;
+            document.getElementById('stop-btn').classList.add('hidden');
+            document.getElementById('train-btn').classList.remove('hidden');
+        }
+
+        function forceStop() { brain.stopSignal = true; simActive = false; }
+
+        function learn() {
+            const type = document.getElementById('mType').value;
+            const sr = (destroyedCount / totalWaveSize) * 100;
+            brain.history.push(sr);
+            
+            if (sr === 100 && brain.convPoint === null) brain.convPoint = brain.history.length;
+
+            const error = (100 - sr) / 100;
+            if (sr < 100) {
+                // Adaptive reinforcement learning adjustments
+                brain.navN[type] += 0.35 * error;
+                brain.aggression += 0.15 * error;
+                brain.interceptorCap = Math.min(brain.interceptorCap + 2, 60);
+            }
+
+            document.getElementById('conv-status').innerText = brain.convPoint ? `RUN ${brain.convPoint}` : "ADAPTING...";
+            document.getElementById('best-val').innerText = `${brain.bestSR.toFixed(1)}%`;
+            updateChart();
+            return `Efficiency: ${sr.toFixed(1)}% | N: ${brain.navN[type].toFixed(2)}\nNo-Improvement Streak: ${brain.stagnationCounter}/7`;
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            if(simActive) {
+                clock += 0.016;
+                const iSpeed = 30 * 2.3 * brain.aggression;
+
+                missiles.forEach(m => {
+                    if(!m.active) return;
+                    m.mesh.position.x -= m.speed;
+                    if(m.type === 'sinusoidal') m.mesh.position.y = m.startY + Math.sin(clock * 6) * 120;
+                    if(m.type === 'evasive') m.mesh.position.z = m.startZ + Math.cos(clock * 4) * 180;
+
+                    if(m.mesh.position.x < -300) {
+                        m.active = false; m.outcome = 'leak'; leakedCount++;
+                        scene.remove(m.mesh); checkEnd();
+                    }
+
+                    // Sector Ownership firing logic
+                    batteries.forEach(bat => {
+                        if(m.mesh.position.z >= bat.sectorMin && m.mesh.position.z <= bat.sectorMax) {
+                            const activeInts = interceptors.filter(i => i.active).length;
+                            const delay = Math.max(0.02, 0.14 - (brain.interceptorCap * 0.005));
+                            
+                            if(!m.targeted && activeInts < brain.interceptorCap && (clock - lastLaunchTime) > delay) {
+                                const iM = new THREE.Mesh(new THREE.CylinderGeometry(2, 2, 35), new THREE.MeshBasicMaterial({color: 0x00f2ff}));
+                                iM.position.copy(bat.mesh.position);
+                                scene.add(iM);
+                                interceptors.push({ mesh: iM, target: m, active: true, lastRel: null });
+                                m.targeted = true;
+                                lastLaunchTime = clock;
+                            }
+                        }
+                    });
+                });
+
+                interceptors.forEach(i => {
+                    if(!i.active) return;
+                    const tPos = i.target.mesh.position.clone();
+                    const dist = i.mesh.position.distanceTo(tPos);
+                    const t = Math.min(dist / iSpeed, 2.0);
+                    
+                    tPos.x -= i.target.speed * t;
+                    if (i.target.type === 'sinusoidal') tPos.y = i.target.startY + Math.sin((clock + t) * 6) * 120;
+                    if (i.target.type === 'evasive') tPos.z = i.target.startZ + Math.cos((clock + t) * 4) * 180;
+
+                    const rel = new THREE.Vector3().subVectors(tPos, i.mesh.position);
+                    if (!i.lastRel) i.lastRel = rel.clone();
+                    const dir = rel.clone().normalize();
+                    const los = new THREE.Vector3().subVectors(dir, i.lastRel.clone().normalize());
+                    const n = brain.navN[i.target.type];
+                    const finalDir = dir.add(los.multiplyScalar(n)).normalize();
+
+                    i.mesh.position.add(finalDir.multiplyScalar(iSpeed));
+                    i.mesh.lookAt(tPos);
+
+                    if(i.mesh.position.distanceTo(tPos) < 65) {
+                        i.active = false; i.target.active = false; i.target.outcome = 'hit';
+                        destroyedCount++; scene.remove(i.target.mesh); scene.remove(i.mesh);
+                        checkEnd();
+                    }
+                    i.lastRel.copy(rel);
+                });
+            }
+            renderer.render(scene, camera);
+        }
+
+        function checkEnd() {
+            const finished = missiles.filter(m => m.outcome !== null).length;
+            if (finished === totalWaveSize && totalWaveSize > 0) {
+                simActive = false;
+                if(!isBatchRunning) {
+                    const log = learn();
+                    document.getElementById('popup-title').innerText = leakedCount === 0 ? "WAVE CLEARED" : "SYSTEM BREACH";
+                    document.getElementById('popup-body').innerText = log;
+                    document.getElementById('outcome-popup').style.display = 'block';
+                }
+            }
+        }
+
+        function updateChart() {
+            const ctx = document.getElementById('learningChart').getContext('2d');
+            if (chartInstance) chartInstance.destroy();
+            chartInstance = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: brain.history ? brain.history.map((_, i) => i + 1) : [],
+                    datasets: [{
+                        label: 'Neural Score', data: brain.history || [],
+                        borderColor: '#00f2ff', backgroundColor: 'rgba(0, 242, 255, 0.1)',
+                        fill: true, tension: 0.3
+                    }]
+                },
+                options: {
+                    responsive: true, maintainAspectRatio: false,
+                    scales: {
+                        y: { min: 0, max: 100, ticks: { color: '#00f2ff' } },
+                        x: { ticks: { color: '#00f2ff' } }
+                    },
+                    plugins: { legend: { display: false } }
+                }
+            });
+        }
+
+        function closePopup() { document.getElementById('outcome-popup').style.display = 'none'; setSimulation(); }
+        
+        // Initial setup on load
+        manualInitialize();
+        simActive = false; 
+        animate();
+    </script>
+</body>
+</html>
